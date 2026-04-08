@@ -1,0 +1,828 @@
+import { useState, useRef } from "react";
+
+/* ═══════════════════════════════════════════════════════════
+   CAREER CATALYST — AI Resume Intelligence Platform
+   With rate-limit handling, model fallback, and error UX
+   ═══════════════════════════════════════════════════════════ */
+
+const T = {
+  bg: "#f6f7f9", card: "#ffffff",
+  primary: "#0b3d91", primarySoft: "#e4edf8", primaryGhost: "#f3f7fc",
+  accent: "#5856d6", accentSoft: "#eeedfc",
+  ok: "#0f7b5f", okSoft: "#e5f5ef",
+  warn: "#b85c00", warnSoft: "#fff4e5",
+  err: "#c62828", errSoft: "#fdeaea",
+  text: "#101828", t2: "#475467", t3: "#98a2b3",
+  border: "#e4e7ec", borderSoft: "#f2f4f7",
+};
+const font = `'DM Sans', system-ui, sans-serif`;
+const fontD = `'Instrument Serif', Georgia, serif`;
+
+// ─── Tiny UI ───────────────────────────────────────────────
+const Ic = ({ n, sz = 18, c = T.t3, f, s }) => (
+  <span className="mso" style={{ fontSize: sz, color: c, fontVariationSettings: f ? "'FILL' 1" : "'FILL' 0", lineHeight: 1, ...s }}>{n}</span>
+);
+const Pill = ({ children, c = "default" }) => {
+  const m = { default: [T.borderSoft, T.t2], primary: [T.primarySoft, T.primary], ok: [T.okSoft, T.ok], warn: [T.warnSoft, T.warn], err: [T.errSoft, T.err], accent: [T.accentSoft, T.accent] };
+  const [bg, fg] = m[c] || m.default;
+  return <span style={{ background: bg, color: fg, padding: "3px 10px", borderRadius: 6, fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap" }}>{children}</span>;
+};
+const Ring = ({ v, sz = 96, sw = 4, c = T.ok }) => {
+  const r = (sz - sw) / 2, ci = 2 * Math.PI * r, off = ci - (v / 100) * ci;
+  return (
+    <div style={{ position: "relative", width: sz, height: sz, flexShrink: 0 }}>
+      <svg width={sz} height={sz} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={sz/2} cy={sz/2} r={r} fill="none" stroke={T.borderSoft} strokeWidth={sw} />
+        <circle cx={sz/2} cy={sz/2} r={r} fill="none" stroke={c} strokeWidth={sw} strokeDasharray={ci} strokeDashoffset={off} strokeLinecap="round" style={{ transition: "stroke-dashoffset 1s ease" }} />
+      </svg>
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ fontSize: sz * .26, fontWeight: 700, color: c, fontFamily: font }}>{v}%</span>
+      </div>
+    </div>
+  );
+};
+const Card = ({ children, p = 22, s }) => <div style={{ background: T.card, borderRadius: 14, padding: p, border: `1px solid ${T.border}`, ...s }}>{children}</div>;
+const Lbl = ({ children, icon }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
+    {icon && <Ic n={icon} sz={14} c={T.primary} />}
+    <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".11em", color: T.t3 }}>{children}</span>
+  </div>
+);
+const Btn = ({ children, onClick, v = "primary", disabled, s, icon }) => {
+  const st = { primary: { background: T.primary, color: "#fff", border: "none" }, ghost: { background: "transparent", color: T.t2, border: `1px solid ${T.border}` }, ok: { background: T.ok, color: "#fff", border: "none" } };
+  return <button disabled={disabled} onClick={onClick} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 18px", borderRadius: 8, fontWeight: 600, fontSize: 12, fontFamily: font, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? .45 : 1, ...st[v], ...s }}>{icon && <Ic n={icon} sz={14} c={v === "primary" || v === "ok" ? "#fff" : T.t2} />}{children}</button>;
+};
+
+// ═══════════════════════════════════════════════════════════
+//  RATE LIMIT ERROR CLASS
+// ═══════════════════════════════════════════════════════════
+class RateLimitError extends Error {
+  constructor(message, retryAfter) {
+    super(message);
+    this.name = "RateLimitError";
+    this.retryAfter = retryAfter; // seconds or null
+  }
+}
+
+// ─── Model fallback chain ──────────────────────────────────
+const MODELS = [
+  { id: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
+  { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+];
+
+// ═══════════════════════════════════════════════════════════
+//  CLAUDE API — with rate limit detection + model fallback
+// ═══════════════════════════════════════════════════════════
+async function askClaude(systemPrompt, userMessage, modelIndex = 0) {
+  const model = MODELS[modelIndex];
+  if (!model) throw new RateLimitError("All AI models are currently rate-limited. Please try again later.", null);
+
+  console.log(`[Career Catalyst] API call → model: ${model.id}, system prompt length: ${systemPrompt.length}, user message length: ${userMessage.length}`);
+
+  let res;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model.id,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMessage }],
+      }),
+    });
+  } catch (networkErr) {
+    console.error(`[Career Catalyst] Network error calling ${model.id}:`, networkErr);
+    throw new Error("Network error — could not reach the AI service. Check your connection.");
+  }
+
+  // ── Parse the response body ──
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`API returned non-JSON response (status ${res.status})`);
+  }
+
+  console.log(`[Career Catalyst] Response from ${model.id}: status=${res.status}, type=${body?.type || "unknown"}`);
+
+  // ── Detect rate limit / exceeded_limit ──
+  if (body?.type === "exceeded_limit" || body?.error?.type === "exceeded_limit" ||
+      res.status === 429 || res.status === 529) {
+
+    const errMsg = body?.error?.message || body?.message || "Usage limit reached";
+    const retryHeader = res.headers?.get("retry-after");
+    const retryAfter = retryHeader ? parseInt(retryHeader) : null;
+
+    console.warn(`[Career Catalyst] Rate limited on ${model.id}: ${errMsg}. Retry-After: ${retryAfter || "unknown"}`);
+
+    // ── Try fallback model ──
+    if (modelIndex < MODELS.length - 1) {
+      const next = MODELS[modelIndex + 1];
+      console.log(`[Career Catalyst] Falling back to ${next.id}…`);
+      return askClaude(systemPrompt, userMessage, modelIndex + 1);
+    }
+
+    // All models exhausted
+    throw new RateLimitError(
+      "AI usage limit reached. Your 5-hour usage window has been exhausted for all available models. Please wait and try again later.",
+      retryAfter
+    );
+  }
+
+  // ── Other API errors ──
+  if (!res.ok || body?.error) {
+    const msg = body?.error?.message || `API error (status ${res.status})`;
+    console.error(`[Career Catalyst] API error from ${model.id}:`, msg);
+    throw new Error(msg);
+  }
+
+  const text = (body.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  if (!text) throw new Error("AI returned an empty response");
+
+  console.log(`[Career Catalyst] Success from ${model.id}, response length: ${text.length}`);
+  return text;
+}
+
+function extractJSON(raw) {
+  try { return JSON.parse(raw.trim()); } catch {}
+  const s = raw.replace(/^```(?:json)?\s*/gm, "").replace(/```\s*$/gm, "").trim();
+  try { return JSON.parse(s); } catch {}
+  const m1 = s.match(/\{[\s\S]*\}/);
+  if (m1) try { return JSON.parse(m1[0]); } catch {}
+  const m2 = s.match(/\[[\s\S]*\]/);
+  if (m2) try { return JSON.parse(m2[0]); } catch {}
+  throw new Error("Could not parse structured data from AI response");
+}
+
+async function parseResume(text) {
+  console.log("[Career Catalyst] Tool: parseResume");
+  const sys = `You are an expert resume parser. Extract structured data from resume text. Return ONLY valid JSON — no markdown fences, no explanation, no backticks. Schema: {"name":"string","title":"string","location":"string","email":"string","phone":"string","layoutType":"Single-Column Standard","sections":[{"name":"string","status":"detected","confidence":90,"heading":"string","note":"string"}],"summary":"string","experience":[{"role":"string","company":"string","period":"string","bullets":["string"]}],"education":[{"degree":"string","school":"string","year":"string"}],"coreSkills":["string"],"transferableSkills":["string"],"domainSkills":["string"],"certifications":["string"]}. Extract ALL skills from bullets too. Infer transferable skills. Status can be detected/inferred/extracted/mapped. Confidence 80-99.`;
+  return extractJSON(await askClaude(sys, "Parse this resume:\n\n" + text));
+}
+
+async function matchJD(resumeData, jdText) {
+  console.log("[Career Catalyst] Tool: matchJD");
+  const sys = `You are a resume-to-JD matcher. Return ONLY valid JSON — no markdown, no backticks. Schema: {"matchScore":82,"keywordScore":75,"semanticScore":89,"matchLevel":"Strong Match","semanticMatches":[{"resume":"phrase","jd":"phrase","score":88}],"missingKeywords":["kw"],"suggestions":[{"id":1,"category":"ATS Optimization","icon":"search","original":"text","improved":"text","reason":"text","impact":"High","tags":["ATS"]}],"interviewQuestions":[{"category":"Resume-Based","question":"q","source":"source","confidence":"Strong","followUp":"q","starHint":"hint"}]}. Generate 4-6 suggestions and 4-6 questions using real content.`;
+  return extractJSON(await askClaude(sys, "Resume:\n" + JSON.stringify(resumeData) + "\n\nJob Description:\n" + jdText));
+}
+
+async function genJobs(resumeData) {
+  console.log("[Career Catalyst] Tool: genJobs");
+  const sys = `You are a career intelligence engine. Return ONLY a valid JSON array — no markdown, no backticks. Each item: {"title":"string","company":"string","fit":"Strong Fit","score":82,"alignedSkills":["s"],"missingSkills":["s"],"reason":"string","action":"Tailor Resume"}. Generate 5 varied jobs across industries. fit can be: Strong Fit, Stretch Fit, Skill Gap but Viable, Transferable Skills Match, Strong Domain Match.`;
+  return extractJSON(await askClaude(sys, "Resume data:\n" + JSON.stringify(resumeData)));
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RATE LIMIT BANNER
+// ═══════════════════════════════════════════════════════════
+const RateLimitBanner = ({ onDismiss }) => (
+  <div style={{ background: "#FFF8E1", border: "1px solid #FFE082", borderRadius: 12, padding: "16px 20px", margin: "0 0 18px 0", display: "flex", alignItems: "flex-start", gap: 12 }}>
+    <Ic n="schedule" sz={22} c="#F57F17" f s={{ marginTop: 1, flexShrink: 0 }} />
+    <div style={{ flex: 1 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#E65100", marginBottom: 4 }}>AI usage limit reached</div>
+      <p style={{ fontSize: 12.5, color: "#795548", lineHeight: 1.6, margin: "0 0 8px 0" }}>
+        Your 5-hour AI usage window has been exhausted. This limit applies to all Claude-powered features including resume parsing, job matching, and suggestion generation.
+      </p>
+      <p style={{ fontSize: 11.5, color: "#8D6E63", lineHeight: 1.5, margin: 0 }}>
+        The limit resets automatically. Please wait a while and try again, or check the console for detailed error information.
+      </p>
+    </div>
+    {onDismiss && (
+      <button onClick={onDismiss} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, flexShrink: 0 }}>
+        <Ic n="close" sz={16} c="#A1887F" />
+      </button>
+    )}
+  </div>
+);
+
+// ─── Process bar ───────────────────────────────────────────
+const ProcBar = () => (
+  <div style={{ background: T.primaryGhost, borderBottom: `1px solid ${T.border}`, padding: "9px 28px", display: "flex", alignItems: "center", gap: 14, overflowX: "auto" }}>
+    {["Parsed document", "Detected sections", "Mapped headings", "Extracted skills", "Built profile"].map((s, i, a) => (
+      <div key={i} style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+        <Ic n="check_circle" sz={13} c={T.ok} f />
+        <span style={{ fontSize: 11, fontWeight: 500, color: T.text, whiteSpace: "nowrap" }}>{s}</span>
+        {i < a.length - 1 && <div style={{ width: 14, height: 1, background: T.border }} />}
+      </div>
+    ))}
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
+//  UPLOAD
+// ═══════════════════════════════════════════════════════════
+const Upload = ({ onDone }) => {
+  const [resume, setResume] = useState("");
+  const [jd, setJd] = useState("");
+  const [phase, setPhase] = useState("resume");
+  const [progress, setProgress] = useState("");
+  const [error, setError] = useState(null);
+  const [rateLimited, setRateLimited] = useState(false);
+  const fRef = useRef();
+
+  const doAnalyze = async () => {
+    if (rateLimited) return;
+    if (!resume.trim()) { setError("Please paste your resume first."); return; }
+    setError(null);
+    setRateLimited(false);
+    setPhase("working");
+    try {
+      setProgress("Step 1/3 — Parsing your resume…");
+      const resumeData = await parseResume(resume);
+      let matchData = null;
+      if (jd.trim()) {
+        setProgress("Step 2/3 — Matching against job description…");
+        matchData = await matchJD(resumeData, jd);
+      }
+      setProgress(`Step ${jd.trim() ? "3/3" : "2/2"} — Generating job recommendations…`);
+      const jobFeed = await genJobs(resumeData);
+      onDone({ resumeData, matchData, jobFeed });
+    } catch (err) {
+      console.error("[Career Catalyst] Analysis failed:", err);
+      if (err instanceof RateLimitError || err.name === "RateLimitError") {
+        setRateLimited(true);
+        setError(null); // banner handles the display
+      } else {
+        setError(err.message);
+      }
+      setPhase("jd");
+    }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: T.bg, padding: 40 }}>
+      <div style={{ maxWidth: 600, width: "100%" }}>
+        <div style={{ textAlign: "center", marginBottom: 36 }}>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 9, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Ic n="auto_awesome" sz={17} c="#fff" f />
+            </div>
+            <span style={{ fontSize: 19, fontWeight: 700, color: T.primary }}>Career Catalyst</span>
+          </div>
+          <h1 style={{ fontFamily: fontD, fontSize: 36, fontWeight: 400, color: T.text, lineHeight: 1.15, margin: "0 0 6px 0" }}>
+            {phase === "resume" ? "Paste your resume" : phase === "jd" ? "Add a job description" : "Analyzing…"}
+          </h1>
+          <p style={{ fontSize: 13.5, color: T.t2, maxWidth: 400, margin: "0 auto", lineHeight: 1.6 }}>
+            {phase === "resume" && "Paste the full text of your resume below. AI will parse it regardless of format."}
+            {phase === "jd" && "Optional: paste a job description for match scoring, suggestions, and interview prep."}
+            {phase === "working" && "Claude is processing — this takes about 15–30 seconds."}
+          </p>
+        </div>
+
+        {/* Rate limit banner */}
+        {rateLimited && <RateLimitBanner onDismiss={() => setRateLimited(false)} />}
+
+        {phase === "working" && (
+          <Card p={40} s={{ textAlign: "center" }}>
+            <div style={{ display: "inline-block", width: 36, height: 36, border: `3px solid ${T.borderSoft}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 1s linear infinite", marginBottom: 14 }} />
+            <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{progress}</div>
+            <p style={{ fontSize: 12, color: T.t3, marginTop: 6 }}>Please wait…</p>
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </Card>
+        )}
+
+        {phase === "resume" && (
+          <>
+            <Card p={0} s={{ overflow: "hidden", marginBottom: 14 }}>
+              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${T.border}`, background: T.borderSoft, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: T.t2 }}>Resume Text</span>
+                <div><input ref={fRef} type="file" accept=".txt,.md" onChange={(e) => { const f = e.target.files?.[0]; if(f) f.text().then(t => { setResume(t); setError(null); }).catch(() => setError("Can't read file")); }} style={{ display: "none" }} /><Btn v="ghost" icon="upload_file" onClick={() => fRef.current?.click()} s={{ padding: "4px 10px", fontSize: 10 }}>Upload .txt</Btn></div>
+              </div>
+              <textarea value={resume} onChange={e => { setResume(e.target.value); setError(null); }}
+                placeholder={"Paste your full resume text here…\n\nJane Smith\nSenior Product Manager | San Francisco, CA\njane@email.com\n\nProfessional Summary\nExperienced product leader with 8+ years…\n\nExperience\nSenior PM — Acme Corp (2021–Present)\n• Led cross-functional team of 12…\n• Drove $4.2M ARR growth in first year\n\nSkills\nProduct Strategy, SQL, A/B Testing, Agile…"}
+                style={{ width: "100%", minHeight: 280, padding: 18, border: "none", outline: "none", fontFamily: "'DM Mono', monospace", fontSize: 12, lineHeight: 1.7, color: T.text, background: T.card, resize: "vertical" }} />
+            </Card>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <Btn onClick={() => { if (!resume.trim()) { setError("Please paste your resume."); return; } setError(null); setPhase("jd"); }} icon="arrow_forward">Next: Job Description</Btn>
+            </div>
+          </>
+        )}
+
+        {phase === "jd" && (
+          <>
+            <Card p={0} s={{ overflow: "hidden", marginBottom: 14 }}>
+              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${T.border}`, background: T.borderSoft, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: T.t2 }}>Job Description <span style={{ fontWeight: 400, color: T.t3 }}>(optional)</span></span>
+                <Btn v="ghost" onClick={() => setPhase("resume")} s={{ padding: "4px 10px", fontSize: 10 }} icon="arrow_back">Back</Btn>
+              </div>
+              <textarea value={jd} onChange={e => setJd(e.target.value)}
+                placeholder={"Paste the job description here…\n\nSenior Product Manager — TechCorp\n\nAbout the role\nWe're looking for a PM to own our platform…\n\nRequirements\n• 5+ years PM experience\n• SQL and analytics\n• B2B SaaS experience…"}
+                style={{ width: "100%", minHeight: 220, padding: 18, border: "none", outline: "none", fontFamily: "'DM Mono', monospace", fontSize: 12, lineHeight: 1.7, color: T.text, background: T.card, resize: "vertical" }} />
+            </Card>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <Btn v="ghost" onClick={doAnalyze} icon="skip_next" disabled={rateLimited}>Skip — resume only</Btn>
+              <Btn onClick={doAnalyze} icon="auto_awesome" disabled={rateLimited}>
+                {rateLimited ? "Limit Reached" : "Analyze with AI"}
+              </Btn>
+            </div>
+            {rateLimited && (
+              <p style={{ fontSize: 11, color: T.warn, textAlign: "right", marginTop: 8 }}>
+                AI features temporarily unavailable. Try again later.
+              </p>
+            )}
+          </>
+        )}
+
+        {error && !rateLimited && (
+          <div style={{ background: T.errSoft, color: T.err, padding: "12px 16px", borderRadius: 8, fontSize: 12.5, marginTop: 14, display: "flex", alignItems: "flex-start", gap: 8, lineHeight: 1.5 }}>
+            <Ic n="error" sz={15} c={T.err} s={{ marginTop: 2, flexShrink: 0 }} />
+            <div><strong>Error:</strong> {error}</div>
+          </div>
+        )}
+
+        <p style={{ fontSize: 10.5, color: T.t3, textAlign: "center", marginTop: 24 }}>Powered by Claude AI · No data stored</p>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  SIDEBAR + TOPBAR
+// ═══════════════════════════════════════════════════════════
+const Sidebar = ({ tab, setTab, name }) => {
+  const tabs = [{ id: "matcher", icon: "analytics", label: "Resume Intelligence" }, { id: "editor", icon: "auto_fix_high", label: "AI Editor" }, { id: "jobs", icon: "work_outline", label: "Job Feed" }, { id: "interview", icon: "record_voice_over", label: "Interview Prep" }];
+  return (
+    <div style={{ width: 230, height: "100vh", position: "fixed", left: 0, top: 0, background: T.borderSoft, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column", padding: "16px 10px", zIndex: 100 }}>
+      <div style={{ padding: "0 10px", marginBottom: 26 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 26, height: 26, borderRadius: 7, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Ic n="auto_awesome" sz={14} c="#fff" f /></div>
+          <div><div style={{ fontSize: 13, fontWeight: 700, color: T.primary }}>Career Catalyst</div><div style={{ fontSize: 8, fontWeight: 600, color: T.t3, textTransform: "uppercase", letterSpacing: ".08em" }}>AI Intelligence</div></div>
+        </div>
+      </div>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+        {tabs.map(t => <button key={t.id} onClick={() => setTab(t.id)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 8, border: "none", cursor: "pointer", background: tab === t.id ? T.card : "transparent", color: tab === t.id ? T.primary : T.t2, fontWeight: 600, fontSize: 11.5, fontFamily: font, boxShadow: tab === t.id ? "0 1px 3px rgba(0,0,0,.04)" : "none" }}><Ic n={t.icon} sz={15} c={tab === t.id ? T.primary : T.t3} f={tab === t.id} />{t.label}</button>)}
+      </div>
+      {name && <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, fontSize: 10.5, color: T.t3, padding: "10px 10px 0" }}><Ic n="person" sz={11} c={T.t3} s={{ marginRight: 4 }} />{name}</div>}
+    </div>
+  );
+};
+// ═══════════════════════════════════════════════════════════
+//  SHARE SYSTEM — save/load analysis via localStorage
+//  On Netlify: uses localStorage + URL hash for same-device sharing
+//  For cross-device sharing: encodes state in URL hash (compressed)
+// ═══════════════════════════════════════════════════════════
+function compressState(state) {
+  const minimal = {
+    r: state.resumeData,
+    m: state.matchData,
+    j: state.jobFeed,
+  };
+  return btoa(unescape(encodeURIComponent(JSON.stringify(minimal))));
+}
+
+function decompressState(encoded) {
+  try {
+    const json = decodeURIComponent(escape(atob(encoded)));
+    const obj = JSON.parse(json);
+    return { resumeData: obj.r, matchData: obj.m, jobFeed: obj.j };
+  } catch { return null; }
+}
+
+async function saveShare(state) {
+  const id = "cc_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const payload = JSON.stringify({
+    resumeData: state.resumeData,
+    matchData: state.matchData,
+    jobFeed: state.jobFeed,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Try window.storage first (Claude artifacts), then localStorage
+  try {
+    if (typeof window !== "undefined" && window.storage && typeof window.storage.set === "function") {
+      await window.storage.set(id, payload, true);
+      return { type: "storage", id };
+    }
+  } catch {}
+
+  // Fallback: localStorage (same-device only)
+  try {
+    localStorage.setItem(id, payload);
+    return { type: "local", id };
+  } catch {}
+
+  // Last resort: encode in URL (cross-device, but large URL)
+  const encoded = compressState(state);
+  return { type: "encoded", id: "d_" + encoded };
+}
+
+async function loadShare(hash) {
+  // Check if it's base64-encoded state
+  if (hash.startsWith("d_")) {
+    return decompressState(hash.slice(2));
+  }
+
+  // Try window.storage first
+  try {
+    if (typeof window !== "undefined" && window.storage && typeof window.storage.get === "function") {
+      const result = await window.storage.get(hash, true);
+      if (result?.value) return JSON.parse(result.value);
+    }
+  } catch {}
+
+  // Try localStorage
+  try {
+    const data = localStorage.getItem(hash);
+    if (data) return JSON.parse(data);
+  } catch {}
+
+  return null;
+}
+
+const TopBar = ({ data, onReset, onShare, shareStatus }) => (
+  <div style={{ height: 46, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 22px", background: "rgba(255,255,255,.9)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 50 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>{data.name}</span><span style={{ color: T.t3, fontSize: 10 }}>·</span><span style={{ fontSize: 11.5, color: T.t2 }}>{data.title}</span>
+      {data.layoutType && <Pill c="primary">{data.layoutType}</Pill>}
+    </div>
+    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+      {shareStatus === "copied" && <span style={{ fontSize: 10.5, color: T.ok, fontWeight: 600 }}><Ic n="check" sz={12} c={T.ok} s={{marginRight:3}}/>Link copied!</span>}
+      {shareStatus === "saving" && <span style={{ fontSize: 10.5, color: T.t3 }}>Saving…</span>}
+      {shareStatus === "error" && <span style={{ fontSize: 10.5, color: T.err }}>Share failed</span>}
+      <Btn v="ghost" icon="share" onClick={onShare} s={{ padding: "3px 9px", fontSize: 10 }} disabled={shareStatus === "saving"}>Share</Btn>
+      <Pill c="ok">Parsed</Pill>
+      <Btn v="ghost" icon="restart_alt" onClick={onReset} s={{ padding: "3px 9px", fontSize: 10 }}>New</Btn>
+    </div>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
+//  EXPORT ENGINE — generates HTML resume and triggers download
+// ═══════════════════════════════════════════════════════════
+function buildResumeHTML(data, match, mode, appliedSuggestions) {
+  const sug = match?.suggestions || [];
+  const applied = appliedSuggestions || new Set();
+
+  const getBulletText = (b) => {
+    if (mode === "preserve") return b;
+    const s = sug.find(s => s.original && b.toLowerCase().includes(s.original.toLowerCase().substring(0, 15)));
+    return (s && (mode !== "preserve") && applied.has(s.id)) ? s.improved : (mode === "ats" || mode === "modern" || mode === "enhanced") && s ? s.improved : b;
+  };
+
+  const allSkills = [...(data.coreSkills || []), ...(data.transferableSkills || []), ...(data.domainSkills || [])];
+  const isAts = mode === "ats";
+  const isModern = mode === "modern";
+
+  const fontFamily = isAts ? "Arial, Helvetica, sans-serif" : isModern ? "'Segoe UI', Tahoma, sans-serif" : "Georgia, 'Times New Roman', serif";
+  const accentColor = isAts ? "#000000" : isModern ? "#0b3d91" : "#333333";
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${data.name || "Resume"}</title>
+<style>
+  @page { margin: 0.6in 0.75in; size: letter; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: ${fontFamily}; font-size: ${isAts ? "11pt" : "10.5pt"}; color: #222; line-height: 1.5; max-width: 8.5in; margin: 0 auto; padding: ${isAts ? "0.5in 0.6in" : "0.4in 0.6in"}; }
+  h1 { font-size: ${isModern ? "22pt" : "18pt"}; font-weight: ${isModern ? "300" : "700"}; color: ${accentColor}; letter-spacing: ${isModern ? "0.04em" : "0.02em"}; text-transform: uppercase; margin-bottom: 4px; ${isModern ? "border-bottom: 2px solid " + accentColor + "; padding-bottom: 6px;" : ""} }
+  .contact { font-size: 9.5pt; color: #555; margin-bottom: ${isAts ? "14px" : "10px"}; }
+  .section-title { font-size: ${isAts ? "11pt" : "10pt"}; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: ${accentColor}; border-bottom: 1px solid ${isAts ? "#000" : "#ccc"}; padding-bottom: 2px; margin: ${isAts ? "14px" : "12px"} 0 6px 0; }
+  .job-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1px; }
+  .job-title { font-weight: 700; font-size: 10.5pt; }
+  .job-date { font-size: 9pt; color: #666; }
+  .job-company { font-style: italic; font-size: 9.5pt; color: ${isModern ? accentColor : "#444"}; margin-bottom: 4px; }
+  ul { padding-left: 18px; margin: 2px 0 8px 0; }
+  li { margin-bottom: 3px; font-size: 10pt; line-height: 1.5; }
+  .skills { display: flex; flex-wrap: wrap; gap: ${isAts ? "4px 16px" : "6px"}; margin-top: 4px; }
+  .skill-tag { ${isAts ? "font-size: 10pt;" : `font-size: 9pt; background: #f0f4f8; padding: 2px 8px; border-radius: 4px; color: ${accentColor};`} }
+  .summary { font-size: 10pt; color: #444; line-height: 1.6; margin-bottom: 4px; }
+  .edu-item { margin-bottom: 4px; }
+  .edu-degree { font-weight: 600; font-size: 10pt; }
+  .edu-school { font-size: 9.5pt; color: #555; }
+  @media print { body { padding: 0; } }
+</style>
+</head><body>
+  <h1>${data.name || "Name"}</h1>
+  <div class="contact">${[data.title, data.location, data.email, data.phone].filter(Boolean).join(" · ")}</div>
+
+  ${data.summary ? `<div class="section-title">Summary</div><p class="summary">${data.summary}</p>` : ""}
+
+  ${(data.experience || []).length ? `<div class="section-title">Experience</div>` + (data.experience || []).map(e => `
+    <div class="job-header"><span class="job-title">${e.role}</span><span class="job-date">${e.period || ""}</span></div>
+    <div class="job-company">${e.company}</div>
+    <ul>${(e.bullets || []).map(b => `<li>${getBulletText(b)}</li>`).join("")}</ul>
+  `).join("") : ""}
+
+  ${(data.education || []).length ? `<div class="section-title">Education</div>` + (data.education || []).map(e => `
+    <div class="edu-item"><span class="edu-degree">${e.degree || ""}</span> <span class="edu-school">— ${e.school || ""} ${e.year ? `(${e.year})` : ""}</span></div>
+  `).join("") : ""}
+
+  ${allSkills.length ? `<div class="section-title">Skills</div><div class="skills">${allSkills.map(s => isAts ? `<span class="skill-tag">${s}</span>` : `<span class="skill-tag">${s}</span>`).join(isAts ? ", " : "")}</div>` : ""}
+
+  ${(data.certifications || []).length ? `<div class="section-title">Certifications</div><div>${data.certifications.join(", ")}</div>` : ""}
+</body></html>`;
+}
+
+function downloadResume(data, match, mode, appliedSuggestions) {
+  const html = buildResumeHTML(data, match, mode, appliedSuggestions);
+  const blob = new Blob([html], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+
+  // Open in new tab — user can print to PDF from there
+  const win = window.open("", "_blank");
+  if (win) {
+    win.document.write(html);
+    win.document.close();
+    // Auto-trigger print dialog after a short delay
+    setTimeout(() => {
+      try { win.print(); } catch (e) { console.log("Print dialog blocked, user can print manually"); }
+    }, 600);
+  } else {
+    // Fallback: download as HTML file
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(data.name || "resume").replace(/\s+/g, "_")}_resume.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  MATCHER
+// ═══════════════════════════════════════════════════════════
+const Matcher = ({ data, match }) => {
+  const [showEx, setShowEx] = useState(false);
+  const [selEx, setSelEx] = useState(0);
+  const [exported, setExported] = useState(false);
+  const ex = [
+    { name: "Preserve Original", fid: "96%", mode: "preserve", desc: "Maintains format and spacing", keeps: ["Section order","Font style","Spacing","Bullets"], warns: [] },
+    { name: "Enhanced Original", fid: "92%", mode: "enhanced", desc: "Keeps layout, applies AI content", keeps: ["Section order","Spacing","Alignment"], warns: ["Decorative elements simplified"] },
+    { name: "ATS Clean", fid: "74%", mode: "ats", desc: "Single-column for ATS", keeps: ["Section order","Hierarchy"], warns: ["Layout normalized","Fidelity reduced"] },
+    { name: "Modern Polished", fid: "88%", mode: "modern", desc: "Clean template + AI content", keeps: ["Hierarchy","Bullets"], warns: ["Template replaced"] },
+  ];
+  const avgC = data.sections?.length ? Math.round(data.sections.reduce((a, s) => a + (s.confidence || 90), 0) / data.sections.length) : 92;
+
+  const handleExport = () => {
+    const mode = ex[selEx].mode;
+    console.log(`[Career Catalyst] Export: mode=${mode}, name=${data.name}`);
+    downloadResume(data, match, mode, new Set());
+    setExported(true);
+    setTimeout(() => setExported(false), 3000);
+  };
+
+  return (
+    <div style={{ padding: 22, maxWidth: 1280, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ fontFamily: fontD, fontSize: 26, fontWeight: 400, color: T.text, margin: 0 }}>Resume Intelligence</h2>
+          {match && <p style={{ fontSize: 12, color: T.t2, marginTop: 2 }}>Matched: <strong>{match.matchLevel}</strong></p>}
+        </div>
+        <Btn v="ghost" icon="download" onClick={() => setShowEx(!showEx)} s={{ fontSize: 10.5 }}>Export</Btn>
+      </div>
+      {showEx && (
+        <Card s={{ marginBottom: 18 }} p={14}>
+          <Lbl icon="picture_as_pdf">Export Options</Lbl>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
+            {ex.map((m, i) => (
+              <div key={i} onClick={() => setSelEx(i)} style={{ padding: 11, borderRadius: 9, border: `2px solid ${selEx===i?T.primary:T.border}`, background: selEx===i?T.primaryGhost:T.card, cursor: "pointer", transition: "all .15s" }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: T.text, marginBottom: 2 }}>{m.name}</div>
+                <div style={{ fontSize: 10, color: T.t2, marginBottom: 6, lineHeight: 1.4 }}>{m.desc}</div>
+                <div style={{ fontSize: 9, fontWeight: 700, color: T.t3 }}>FIDELITY: <span style={{ color: parseInt(m.fid)>=90?T.ok:T.warn }}>{m.fid}</span></div>
+                {m.keeps.map((k,j)=><div key={j} style={{ fontSize: 9, color: T.t3, display:"flex", alignItems:"center", gap:3, marginTop:1 }}><Ic n="check" sz={9} c={T.ok}/>{k}</div>)}
+                {m.warns.map((w,j)=><div key={j} style={{ fontSize: 9, color: T.warn, display:"flex", alignItems:"center", gap:3, marginTop:2 }}><Ic n="info" sz={9} c={T.warn}/>{w}</div>)}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14 }}>
+            <div style={{ fontSize: 11, color: T.t3 }}>
+              {exported
+                ? <span style={{ color: T.ok, fontWeight: 600 }}><Ic n="check_circle" sz={13} c={T.ok} f s={{ marginRight: 4 }} />Resume opened — use Print → Save as PDF</span>
+                : `Selected: ${ex[selEx].name} · Fidelity ${ex[selEx].fid}`
+              }
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn v="ghost" onClick={() => {
+                const html = buildResumeHTML(data, match, ex[selEx].mode, new Set());
+                const w = window.open("", "_blank");
+                if (w) { w.document.write(html); w.document.close(); }
+              }} s={{ padding: "7px 14px", fontSize: 11 }} icon="visibility">Preview</Btn>
+              <Btn onClick={handleExport} s={{ padding: "7px 18px", fontSize: 11 }} icon="download">Download PDF</Btn>
+            </div>
+          </div>
+        </Card>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Card><Lbl icon="analytics">Match Score</Lbl>{match?<div style={{display:"flex",alignItems:"center",gap:12}}><Ring v={match.matchScore}/><div><div style={{fontSize:12.5,fontWeight:700,color:T.text}}>{match.matchLevel}</div><div style={{fontSize:10.5,color:T.t2,marginTop:2}}>KW: {match.keywordScore}% · Sem: {match.semanticScore}%</div></div></div>:<p style={{fontSize:11.5,color:T.t3,fontStyle:"italic"}}>Add a JD for match scoring</p>}</Card>
+            <Card><Lbl icon="verified">Parse Confidence</Lbl><div style={{display:"flex",alignItems:"center",gap:12}}><Ring v={avgC} c={T.primary}/><div><div style={{fontSize:12.5,fontWeight:700,color:T.text}}>High</div><div style={{fontSize:10.5,color:T.t2,marginTop:2}}>{data.sections?.length||0} sections</div></div></div></Card>
+          </div>
+          <Card><Lbl icon="view_agenda">Detected Structure</Lbl><div style={{display:"flex",flexDirection:"column",gap:5}}>{(data.sections||[]).map((sec,i)=><div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 10px",borderRadius:7,background:T.borderSoft}}><div style={{display:"flex",alignItems:"center",gap:7,flex:1}}><Ic n={sec.status==="detected"?"check_circle":sec.status==="inferred"?"psychology":"auto_awesome"} sz={14} c={sec.status==="detected"?T.ok:sec.status==="inferred"?T.accent:T.primary} f/><span style={{fontSize:11.5,fontWeight:600,color:T.text}}>{sec.name}</span>{sec.note&&<span style={{fontSize:9.5,color:T.t3}}>— {sec.note}</span>}</div><div style={{display:"flex",alignItems:"center",gap:6}}><Pill c={sec.status==="detected"?"ok":sec.status==="inferred"?"accent":"primary"}>{sec.status}</Pill><span style={{fontSize:10,fontWeight:600,color:(sec.confidence||90)>=95?T.ok:T.primary}}>{sec.confidence||90}%</span></div></div>)}</div></Card>
+          <Card><Lbl icon="psychology">Skills Intelligence</Lbl>{[["CORE",data.coreSkills,"ok"],["TRANSFERABLE",data.transferableSkills,"accent"],["DOMAIN",data.domainSkills,"default"]].map(([l,items,c],gi)=>items?.length>0&&<div key={gi} style={{marginBottom:10}}><div style={{fontSize:9,fontWeight:700,color:T.t3,marginBottom:4}}>{l}</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{items.map((s,i)=><Pill key={i} c={c}>{s}</Pill>)}</div></div>)}{match?.missingKeywords?.length>0&&<div><div style={{fontSize:9,fontWeight:700,color:T.err,marginBottom:4}}>MISSING FROM JD</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{match.missingKeywords.map((s,i)=><Pill key={i} c="err">{s}</Pill>)}</div></div>}</Card>
+        </div>
+        <div style={{ display:"flex",flexDirection:"column",gap:14 }}>
+          {match?.semanticMatches?.length>0&&<Card><Lbl icon="compare_arrows">Semantic Alignment</Lbl><div style={{display:"flex",flexDirection:"column",gap:5}}>{match.semanticMatches.map((m,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:7,background:T.borderSoft}}><div style={{flex:1,fontSize:10.5,color:T.t2}}><span style={{fontWeight:600,color:T.text}}>"{m.resume}"</span></div><Ic n="arrow_forward" sz={11} c={T.t3}/><div style={{flex:1,fontSize:10.5}}><span style={{fontWeight:600,color:T.primary}}>"{m.jd}"</span></div><Pill c={m.score>=90?"ok":"primary"}>{m.score}%</Pill></div>)}</div></Card>}
+          <Card s={{flex:1}}><Lbl icon="description">Parsed Content</Lbl><div style={{background:T.borderSoft,borderRadius:10,padding:18,maxHeight:550,overflowY:"auto"}}><div style={{textAlign:"center",marginBottom:14}}><h3 style={{fontSize:15,fontWeight:700,color:T.text,margin:0}}>{data.name?.toUpperCase()}</h3><p style={{fontSize:10,color:T.t2,marginTop:2}}>{[data.location,data.email,data.phone].filter(Boolean).join(" · ")}</p></div>{data.summary&&<div style={{marginBottom:12}}><div style={{fontSize:8.5,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:T.t3,borderBottom:`1px solid ${T.border}`,paddingBottom:3,marginBottom:5}}>Summary</div><p style={{fontSize:10.5,color:T.t2,lineHeight:1.6}}>{data.summary}</p></div>}{(data.experience||[]).map((e,i)=><div key={i} style={{marginBottom:10}}>{i===0&&<div style={{fontSize:8.5,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:T.t3,borderBottom:`1px solid ${T.border}`,paddingBottom:3,marginBottom:5}}>Experience</div>}<div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:11.5,fontWeight:700,color:T.text}}>{e.role}</span><span style={{fontSize:9,color:T.t3}}>{e.period}</span></div><div style={{fontSize:10,fontWeight:600,color:T.primary,fontStyle:"italic",marginBottom:4}}>{e.company}</div>{(e.bullets||[]).map((b,j)=><div key={j} style={{display:"flex",gap:5,marginBottom:2,fontSize:10,color:T.t2,lineHeight:1.6}}><span style={{color:T.t3,flexShrink:0}}>•</span><span>{b}</span></div>)}</div>)}</div></Card>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  EDITOR
+// ═══════════════════════════════════════════════════════════
+const Editor = ({ data, match }) => {
+  const sug = match?.suggestions||[];
+  const [applied,setApplied]=useState(new Set());
+  const [dismissed,setDismissed]=useState(new Set());
+  const [filter,setFilter]=useState("all");
+  if(!sug.length) return <div style={{padding:60,textAlign:"center"}}><Ic n="edit_note" sz={48} c={T.t3}/><h3 style={{fontFamily:fontD,fontSize:24,color:T.text,marginTop:14}}>No suggestions</h3><p style={{fontSize:13,color:T.t2,marginTop:6}}>Add a job description to get AI edit suggestions.</p></div>;
+  const cats=["all",...new Set(sug.map(s=>s.category))];
+  const vis=sug.filter(s=>!dismissed.has(s.id)&&(filter==="all"||s.category===filter));
+  return (
+    <div style={{display:"flex",height:"calc(100vh - 46px)"}}>
+      <div style={{flex:1,overflowY:"auto",padding:22,background:T.borderSoft,borderRight:`1px solid ${T.border}`}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+          <Lbl icon="description" style={{marginBottom:0}}>Resume — Live Preview</Lbl>
+          <Btn v="ghost" icon="download" onClick={()=>{ downloadResume(data, match, "enhanced", applied); }} s={{padding:"4px 12px",fontSize:10}}>Export with changes</Btn>
+        </div>
+        <Card p={22}>
+          <div style={{textAlign:"center",marginBottom:16}}><h3 style={{fontSize:15,fontWeight:700,color:T.text,margin:0}}>{data.name?.toUpperCase()}</h3><p style={{fontSize:10,color:T.t2,marginTop:2}}>{[data.location,data.email].filter(Boolean).join(" · ")}</p></div>
+          {(data.experience||[]).map((exp,ei)=><div key={ei} style={{marginBottom:14}}>
+            <div style={{fontSize:8.5,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:T.t3,borderBottom:`1px solid ${T.border}`,paddingBottom:3,marginBottom:7}}>Experience</div>
+            <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:12,fontWeight:700,color:T.text}}>{exp.role}</span><span style={{fontSize:9.5,color:T.t3}}>{exp.period}</span></div>
+            <div style={{fontSize:10,fontWeight:600,color:T.primary,fontStyle:"italic",marginBottom:6}}>{exp.company}</div>
+            {(exp.bullets||[]).map((b,j)=>{const s2=sug.find(s=>s.original&&b.toLowerCase().includes(s.original.toLowerCase().substring(0,15)));const isA=s2&&applied.has(s2.id);return <div key={j} style={{display:"flex",gap:5,marginBottom:4,fontSize:10.5,lineHeight:1.65,padding:"3px 8px",borderRadius:5,background:isA?T.okSoft:s2&&!dismissed.has(s2.id)?`${T.primary}08`:"transparent",borderLeft:isA?`3px solid ${T.ok}`:s2?`3px solid ${T.primary}22`:"3px solid transparent",color:T.t2}}><span style={{color:T.t3,flexShrink:0}}>•</span><span>{isA&&s2?s2.improved:b}</span></div>;})}
+          </div>)}
+        </Card>
+      </div>
+      <div style={{width:380,overflowY:"auto",padding:18,background:T.bg}}>
+        <Lbl icon="auto_fix_high">Suggestions ({vis.length})</Lbl>
+        <div style={{display:"flex",gap:3,marginBottom:12,flexWrap:"wrap"}}>{cats.map(cat=><button key={cat} onClick={()=>setFilter(cat)} style={{padding:"3px 9px",borderRadius:14,border:"none",background:filter===cat?T.primary:T.borderSoft,color:filter===cat?"#fff":T.t2,fontSize:9.5,fontWeight:600,cursor:"pointer",fontFamily:font}}>{cat==="all"?"All":cat}</button>)}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:9}}>
+          {vis.map(s=>(
+            <Card key={s.id} p={12} s={{borderLeft:`3px solid ${s.impact==="High"?T.primary:s.impact==="Medium"?T.accent:T.t3}`,opacity:applied.has(s.id)?.5:1}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}><div style={{display:"flex",alignItems:"center",gap:5}}><Ic n={s.icon||"edit"} sz={12} c={T.primary}/><span style={{fontSize:10,fontWeight:700,color:T.primary}}>{s.category}</span></div><Pill c={s.impact==="High"?"err":"default"}>{s.impact}</Pill></div>
+              <div style={{background:T.errSoft,borderRadius:5,padding:"5px 9px",marginBottom:5}}><div style={{fontSize:8,fontWeight:600,color:T.t3}}>ORIGINAL</div><div style={{fontSize:10,color:T.t2,lineHeight:1.5}}>{s.original}</div></div>
+              <div style={{background:T.okSoft,borderRadius:5,padding:"5px 9px",marginBottom:5}}><div style={{fontSize:8,fontWeight:600,color:T.t3}}>IMPROVED</div><div style={{fontSize:10,color:T.text,lineHeight:1.5,fontWeight:500}}>{s.improved}</div></div>
+              <div style={{background:T.primaryGhost,borderRadius:5,padding:"5px 9px",marginBottom:7}}><div style={{fontSize:8,fontWeight:600,color:T.t3}}>WHY</div><div style={{fontSize:10,color:T.t2,lineHeight:1.5}}>{s.reason}</div></div>
+              {s.tags?.length>0&&<div style={{display:"flex",gap:3,marginBottom:6}}>{s.tags.map((t,i)=><Pill key={i}>{t}</Pill>)}</div>}
+              <div style={{display:"flex",gap:5}}><Btn v={applied.has(s.id)?"ok":"primary"} disabled={applied.has(s.id)} onClick={()=>setApplied(p=>new Set([...p,s.id]))} s={{flex:1,justifyContent:"center",padding:"5px 0",fontSize:10}}>{applied.has(s.id)?"✓ Applied":"Apply"}</Btn><Btn v="ghost" onClick={()=>setDismissed(p=>new Set([...p,s.id]))} s={{padding:"5px 11px",fontSize:10}}>Dismiss</Btn></div>
+            </Card>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  JOBS
+// ═══════════════════════════════════════════════════════════
+const Jobs = ({ jobs, setTab }) => {
+  const fc = {"Strong Fit":"ok","Stretch Fit":"warn","Skill Gap but Viable":"err","Transferable Skills Match":"accent","Strong Domain Match":"primary","Requires Resume Reframing":"warn"};
+  if(!jobs?.length) return <div style={{padding:60,textAlign:"center"}}><Ic n="work" sz={48} c={T.t3}/><h3 style={{fontFamily:fontD,fontSize:24,color:T.text,marginTop:14}}>No jobs generated</h3></div>;
+  return (
+    <div style={{padding:22,maxWidth:850,margin:"0 auto"}}>
+      <h2 style={{fontFamily:fontD,fontSize:26,fontWeight:400,color:T.text,margin:"0 0 4px 0"}}>Job Intelligence Feed</h2>
+      <p style={{fontSize:12,color:T.t2,marginBottom:20}}>Matched to your parsed resume</p>
+      <div style={{display:"flex",flexDirection:"column",gap:11}}>
+        {jobs.map((job,i)=>(
+          <Card key={i} p={14}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:9}}>
+              <div><div style={{display:"flex",alignItems:"center",gap:7,marginBottom:2}}><h3 style={{fontSize:13.5,fontWeight:700,color:T.text,margin:0}}>{job.title}</h3><Pill c={fc[job.fit]||"default"}>{job.fit}</Pill></div><p style={{fontSize:11,color:T.t2,margin:0}}>{job.company}</p></div>
+              <Ring v={job.score} sz={44} sw={3} c={job.score>=80?T.ok:job.score>=70?T.primary:T.warn}/>
+            </div>
+            <div style={{background:T.primaryGhost,borderRadius:7,padding:"7px 11px",marginBottom:9}}><div style={{fontSize:8.5,fontWeight:600,color:T.t3,marginBottom:2}}>WHY MATCHED</div><div style={{fontSize:10.5,color:T.t2,lineHeight:1.5}}>{job.reason}</div></div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:9}}>
+              <div><div style={{fontSize:8.5,fontWeight:700,color:T.ok,marginBottom:3}}>ALIGNED</div><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(job.alignedSkills||[]).map((s,j)=><Pill key={j} c="ok">{s}</Pill>)}</div></div>
+              <div><div style={{fontSize:8.5,fontWeight:700,color:T.err,marginBottom:3}}>GAPS</div><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(job.missingSkills||[]).map((s,j)=><Pill key={j} c="err">{s}</Pill>)}</div></div>
+            </div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:5}}><Btn v="ghost" s={{padding:"4px 11px",fontSize:10}}>Save</Btn><Btn v="ghost" s={{padding:"4px 11px",fontSize:10}} onClick={()=>setTab("interview")}>Prep Interview</Btn><Btn s={{padding:"4px 13px",fontSize:10}} onClick={()=>setTab(job.action.includes("Resume")?"editor":"interview")}>{job.action}</Btn></div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  INTERVIEW
+// ═══════════════════════════════════════════════════════════
+const Interview = ({ data, match }) => {
+  const qs=match?.interviewQuestions||[];
+  const [sel,setSel]=useState(0);
+  const cc={"Resume-Based":"primary","JD-Based":"warn","Behavioral":"accent","Technical":"ok","Gap Risk":"err"};
+  const cfc={"Strong":"ok","Medium":"default","Needs Prep":"err"};
+  if(!qs.length) return <div style={{padding:60,textAlign:"center"}}><Ic n="record_voice_over" sz={48} c={T.t3}/><h3 style={{fontFamily:fontD,fontSize:24,color:T.text,marginTop:14}}>No questions</h3><p style={{fontSize:13,color:T.t2,marginTop:6}}>Add a JD for interview prep.</p></div>;
+  const q=qs[sel]||qs[0];
+  return (
+    <div style={{padding:22,maxWidth:1060,margin:"0 auto"}}>
+      <h2 style={{fontFamily:fontD,fontSize:26,fontWeight:400,color:T.text,margin:"0 0 4px 0"}}>Interview Preparation</h2>
+      <p style={{fontSize:12,color:T.t2,marginBottom:20}}>From resume + JD analysis</p>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1.3fr",gap:14}}>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          <Lbl icon="psychology">Questions ({qs.length})</Lbl>
+          {qs.map((iq,i)=><div key={i} onClick={()=>setSel(i)} style={{padding:"9px 11px",borderRadius:8,background:sel===i?T.primaryGhost:T.card,border:`1px solid ${sel===i?T.primary+"30":T.border}`,cursor:"pointer"}}><div style={{display:"flex",gap:4,marginBottom:3}}><Pill c={cc[iq.category]||"default"}>{iq.category}</Pill><Pill c={cfc[iq.confidence]||"default"}>{iq.confidence}</Pill></div><div style={{fontSize:11,fontWeight:600,color:T.text,lineHeight:1.45}}>{iq.question}</div></div>)}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:11}}>
+          <Card p={18}>
+            <div style={{display:"flex",gap:5,marginBottom:9}}><Pill c={cc[q.category]}>{q.category}</Pill><Pill c={cfc[q.confidence]}>{q.confidence}</Pill></div>
+            <h3 style={{fontFamily:fontD,fontSize:18,fontWeight:400,color:T.text,lineHeight:1.3,margin:"0 0 12px 0"}}>{q.question}</h3>
+            <div style={{background:T.primaryGhost,borderRadius:7,padding:"8px 12px",marginBottom:10}}><div style={{fontSize:8.5,fontWeight:600,color:T.t3,marginBottom:2}}>SOURCE</div><div style={{fontSize:11,color:T.t2}}>{q.source}</div></div>
+            {q.starHint&&<div style={{background:T.okSoft,borderRadius:7,padding:"8px 12px",marginBottom:10}}><div style={{fontSize:8.5,fontWeight:600,color:T.ok,marginBottom:2}}>STAR HINT</div><div style={{fontSize:11,color:T.t2,lineHeight:1.5}}>{q.starHint}</div></div>}
+            {q.followUp&&<div style={{background:T.warnSoft,borderRadius:7,padding:"8px 12px"}}><div style={{fontSize:8.5,fontWeight:600,color:T.warn,marginBottom:2}}>FOLLOW-UP</div><div style={{fontSize:11,color:T.t2,lineHeight:1.5}}>{q.followUp}</div></div>}
+          </Card>
+          <Card><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}><div><div style={{fontSize:12.5,fontWeight:700,color:T.text}}>Practice Mode</div><div style={{fontSize:10.5,color:T.t2,marginTop:1}}>Record and get feedback</div></div><Btn icon="mic">Record</Btn></div></Card>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  APP
+// ═══════════════════════════════════════════════════════════
+export default function App() {
+  const [state, setState] = useState(null);
+  const [tab, setTab] = useState("matcher");
+  const [shareStatus, setShareStatus] = useState(null); // null | "saving" | "copied" | "error"
+  const [loading, setLoading] = useState(true);
+
+  // On mount, check URL hash for shared analysis
+  useState(() => {
+    (async () => {
+      try {
+        const hash = window.location.hash.replace("#", "");
+        if (hash && (hash.startsWith("cc_") || hash.startsWith("d_") || hash.startsWith("share_"))) {
+          const data = await loadShare(hash);
+          if (data) {
+            setState(data);
+            setTab("matcher");
+          }
+        }
+      } catch (e) {
+        console.log("[Career Catalyst] No shared state to load");
+      }
+      setLoading(false);
+    })();
+  });
+
+  const handleShare = async () => {
+    if (!state) return;
+    setShareStatus("saving");
+    try {
+      const result = await saveShare(state);
+      const hashId = result.id;
+      // Build shareable URL
+      const url = window.location.origin + window.location.pathname + "#" + hashId;
+      // Copy to clipboard
+      try {
+        await navigator.clipboard.writeText(url);
+        setShareStatus("copied");
+      } catch {
+        window.prompt("Copy this shareable link:", url);
+        setShareStatus("copied");
+      }
+      window.history.replaceState(null, "", "#" + hashId);
+      console.log(`[Career Catalyst] Shared via ${result.type}, id=${hashId}, url=${url}`);
+      setTimeout(() => setShareStatus(null), 3000);
+    } catch (e) {
+      console.error("[Career Catalyst] Share failed:", e);
+      setShareStatus("error");
+      setTimeout(() => setShareStatus(null), 3000);
+    }
+  };
+
+  if (loading) {
+    return (
+      <>
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+        <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+        <style>{`*{box-sizing:border-box;margin:0}body{font-family:${font};background:${T.bg};color:${T.text};-webkit-font-smoothing:antialiased}.mso{font-family:'Material Symbols Outlined';font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;vertical-align:middle;font-style:normal;display:inline-block}`}</style>
+        <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg}}>
+          <div style={{textAlign:"center"}}>
+            <div style={{display:"inline-block",width:32,height:32,border:`3px solid ${T.borderSoft}`,borderTopColor:T.primary,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+            <p style={{fontSize:13,color:T.t2,marginTop:12}}>Loading…</p>
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+      <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+      <style>{`*{box-sizing:border-box;margin:0}body{font-family:${font};background:${T.bg};color:${T.text};-webkit-font-smoothing:antialiased}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${T.border};border-radius:3px}.mso{font-family:'Material Symbols Outlined';font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;vertical-align:middle;font-style:normal;display:inline-block}textarea::placeholder{color:${T.t3}}`}</style>
+      {!state ? (
+        <Upload onDone={r=>{setState(r);setTab("matcher");window.location.hash="";}} />
+      ) : (
+        <div style={{display:"flex",minHeight:"100vh",background:T.bg}}>
+          <Sidebar tab={tab} setTab={setTab} name={state.resumeData?.name} />
+          <main style={{marginLeft:230,flex:1,minHeight:"100vh"}}>
+            <ProcBar/>
+            <TopBar data={state.resumeData} onReset={()=>{setState(null);window.location.hash="";}} onShare={handleShare} shareStatus={shareStatus} />
+            {tab==="matcher"&&<Matcher data={state.resumeData} match={state.matchData}/>}
+            {tab==="editor"&&<Editor data={state.resumeData} match={state.matchData}/>}
+            {tab==="jobs"&&<Jobs jobs={state.jobFeed} setTab={setTab}/>}
+            {tab==="interview"&&<Interview data={state.resumeData} match={state.matchData}/>}
+          </main>
+        </div>
+      )}
+    </>
+  );
+}

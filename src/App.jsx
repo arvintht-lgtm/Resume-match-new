@@ -89,10 +89,9 @@ class RateLimitError extends Error {
 }
 
 const MODELS = [
-  { id: "claude-sonnet-4-20250514", label: "Sonnet 4" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
 ];
-
 // Detect if we're inside a Claude artifact (iframe on claude.ai)
 // In that environment, the Anthropic API can be called directly because
 // a proxy transparently injects auth headers.
